@@ -8,6 +8,7 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -28,6 +29,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.lang.reflect.Method;
 import java.security.SecureRandom;
 import java.util.Map;
 import java.util.UUID;
@@ -46,6 +48,7 @@ public class CaptchaGate extends JavaPlugin implements Listener {
     private Location platformSpawn;
     private int timeoutSeconds;
     private int codeLength;
+    private boolean authMe = false;
 
     private static class Session {
         String code;
@@ -64,7 +67,11 @@ public class CaptchaGate extends JavaPlugin implements Listener {
 
         setupWorld();
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("CaptchaGate enabled.");
+
+        if (getServer().getPluginManager().getPlugin("AuthMe") != null) {
+            hookAuthMe();
+        }
+        getLogger().info("CaptchaGate enabled." + (authMe ? " (waiting for AuthMe login)" : ""));
     }
 
     @Override
@@ -76,6 +83,34 @@ public class CaptchaGate extends JavaPlugin implements Listener {
             if (p != null) restore(p, s);
         }
         sessions.clear();
+    }
+
+    // ------------------------------------------------------------------ AuthMe hook
+
+    /** Listens for AuthMe's LoginEvent via reflection so AuthMe isn't needed to compile. */
+    @SuppressWarnings("unchecked")
+    private void hookAuthMe() {
+        try {
+            final Class<? extends Event> cls = (Class<? extends Event>)
+                    Class.forName("fr.xephi.authme.events.LoginEvent", true, getClass().getClassLoader());
+            final Method getPlayer = cls.getMethod("getPlayer");
+
+            getServer().getPluginManager().registerEvent(cls, this, EventPriority.MONITOR,
+                    (listener, event) -> {
+                        try {
+                            if (!cls.isInstance(event)) return;
+                            Player p = (Player) getPlayer.invoke(event);
+                            if (p != null && p.isOnline()) startCaptcha(p, null);
+                        } catch (Exception ex) {
+                            getLogger().warning("AuthMe login hook error: " + ex.getMessage());
+                        }
+                    }, this);
+
+            authMe = true;
+        } catch (Exception ex) {
+            authMe = false;
+            getLogger().warning("AuthMe found but its LoginEvent could not be hooked: " + ex.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------ world
@@ -144,19 +179,27 @@ public class CaptchaGate extends JavaPlugin implements Listener {
         }
     }
 
-    // ------------------------------------------------------------------ join / leave
+    // ------------------------------------------------------------------ start captcha
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
-        Player p = e.getPlayer();
-        if (p.hasPermission("captchagate.bypass")) return;
+        // With AuthMe, the captcha starts after login instead (see hookAuthMe)
+        if (authMe) return;
+
+        if (startCaptcha(e.getPlayer(), e.getJoinMessage())) {
+            e.setJoinMessage(null); // announce only after they pass
+        }
+    }
+
+    private boolean startCaptcha(Player p, String joinMessage) {
+        if (p.hasPermission("captchagate.bypass")) return false;
+        if (isPending(p)) return false;
 
         Session s = new Session();
         s.code = generateCode();
         s.gameMode = p.getGameMode();
         s.remaining = timeoutSeconds;
-        s.joinMessage = e.getJoinMessage();
-        e.setJoinMessage(null); // announce only after they pass
+        s.joinMessage = joinMessage;
 
         // If they logged out inside the captcha world (crash etc.), send them to main spawn afterwards
         if (p.getWorld().equals(captchaWorld)) {
@@ -197,6 +240,8 @@ public class CaptchaGate extends JavaPlugin implements Listener {
                 showCode(p, s);
             }
         }.runTaskTimer(this, 20L, 20L);
+
+        return true;
     }
 
     @EventHandler
