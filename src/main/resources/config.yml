@@ -1,0 +1,5 @@
+# Seconds a player has to solve the captcha before being kicked
+timeout-seconds: 30
+
+# Number of letters in the captcha
+code-length: 6
