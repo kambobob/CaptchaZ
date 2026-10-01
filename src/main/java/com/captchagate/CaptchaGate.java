@@ -72,8 +72,8 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
 
         setupWorld();
         getServer().getPluginManager().registerEvents(this, this);
-        if (getCommand("captcha") != null) {
-            getCommand("captcha").setExecutor(this);
+        if (getCommand("captchaz") != null) {
+            getCommand("captchaz").setExecutor(this);
         }
         startGuard();
 
@@ -268,7 +268,7 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
         p.teleport(platformSpawn);
 
         p.sendMessage("§e§lCAPTCHA §7» Type the code shown on your screen in chat.");
-        p.sendMessage("§7Chat not working (muted)? Use §e/captcha <code>§7 instead.");
+        p.sendMessage("§7Chat not working (muted)? Use §e/captchaz <code>§7 instead.");
         p.sendMessage("§7You have §c" + timeoutSeconds + " seconds§7. A wrong answer kicks you.");
         showCode(p, s);
 
@@ -304,7 +304,7 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
 
     // ------------------------------------------------------------------ answering
 
-    /** Checks an answer from either chat or /captcha. Must run on the main thread. */
+    /** Checks an answer from either chat or /captchaz. Must run on the main thread. */
     private void answer(Player p, String input) {
         Session s = sessions.get(p.getUniqueId());
         if (s == null || !p.isOnline()) return;
@@ -316,7 +316,7 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
         }
     }
 
-    // /captcha <code>  (works even when a mute plugin blocks chat)
+    // /captchaz <code>  (works even when a mute plugin blocks chat)
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
         if (!(sender instanceof Player p)) {
@@ -384,13 +384,13 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
         }
     }
 
-    // Block every command except /captcha (and its alias /verify) while pending
+    // Block every command except /captchaz while pending
     @EventHandler
     public void onCommandPreprocess(PlayerCommandPreprocessEvent e) {
         if (!isPending(e.getPlayer())) return;
 
         String first = e.getMessage().substring(1).split(" ")[0].toLowerCase();
-        if (first.equals("captcha") || first.equals("verify") || first.startsWith("captchagate:")) {
+        if (first.equals("captchaz") || first.equals("captchagate:captchaz")) {
             return;
         }
         e.setCancelled(true);
