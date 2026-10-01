@@ -6,10 +6,9 @@ softdepend: [AuthMe]
 author: You
 description: Sends joining players to an isolated void platform and makes them solve a captcha.
 commands:
-  captcha:
+  captchaz:
     description: Answer the join captcha
-    usage: /captcha <code>
-    aliases: [verify]
+    usage: /captchaz <code>
 permissions:
   captchagate.bypass:
     description: Skip the join captcha
