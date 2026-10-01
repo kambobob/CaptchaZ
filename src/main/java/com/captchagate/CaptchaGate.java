@@ -25,12 +25,14 @@ import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.lang.reflect.Method;
 import java.security.SecureRandom;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -67,6 +69,7 @@ public class CaptchaGate extends JavaPlugin implements Listener {
 
         setupWorld();
         getServer().getPluginManager().registerEvents(this, this);
+        startGuard();
 
         if (getServer().getPluginManager().getPlugin("AuthMe") != null) {
             hookAuthMe();
@@ -76,13 +79,46 @@ public class CaptchaGate extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        for (Map.Entry<UUID, Session> entry : sessions.entrySet()) {
+        // Clear sessions FIRST so our own teleport-back isn't blocked by the teleport guard
+        Map<UUID, Session> copy = new HashMap<>(sessions);
+        sessions.clear();
+
+        for (Map.Entry<UUID, Session> entry : copy.entrySet()) {
             Session s = entry.getValue();
             if (s.task != null) s.task.cancel();
             Player p = Bukkit.getPlayer(entry.getKey());
             if (p != null) restore(p, s);
         }
-        sessions.clear();
+    }
+
+    // ------------------------------------------------------------------ guard
+
+    /** Every 5 ticks, drag any pending player back to the platform if something moved them away. */
+    private void startGuard() {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                for (UUID id : sessions.keySet()) {
+                    Player p = Bukkit.getPlayer(id);
+                    if (p == null || !p.isOnline()) continue;
+
+                    if (!p.getWorld().equals(captchaWorld)
+                            || p.getLocation().distanceSquared(platformSpawn) > 100) {
+                        p.teleport(platformSpawn);
+                    }
+                }
+            }
+        }.runTaskTimer(this, 5L, 5L);
+    }
+
+    /** Other plugins (lobby / spawn / login) can't teleport pending players out of the captcha world. */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onTeleport(PlayerTeleportEvent e) {
+        if (!isPending(e.getPlayer())) return;
+        Location to = e.getTo();
+        if (to != null && to.getWorld() != null && !to.getWorld().equals(captchaWorld)) {
+            e.setCancelled(true);
+        }
     }
 
     // ------------------------------------------------------------------ AuthMe hook
@@ -100,7 +136,12 @@ public class CaptchaGate extends JavaPlugin implements Listener {
                         try {
                             if (!cls.isInstance(event)) return;
                             Player p = (Player) getPlayer.invoke(event);
-                            if (p != null && p.isOnline()) startCaptcha(p, null);
+                            if (p == null) return;
+
+                            // Wait a few ticks so AuthMe finishes its own teleport/restore first
+                            Bukkit.getScheduler().runTaskLater(this, () -> {
+                                if (p.isOnline()) startCaptcha(p, null);
+                            }, 10L);
                         } catch (Exception ex) {
                             getLogger().warning("AuthMe login hook error: " + ex.getMessage());
                         }
@@ -256,15 +297,22 @@ public class CaptchaGate extends JavaPlugin implements Listener {
 
     // ------------------------------------------------------------------ chat
 
+    // Step 1: keep pending players out of public chat and hide the attempt from everyone
     @EventHandler(priority = EventPriority.LOWEST)
-    public void onChat(AsyncPlayerChatEvent e) {
-        // Pending players never see main chat
+    public void onChatHide(AsyncPlayerChatEvent e) {
         e.getRecipients().removeIf(r -> sessions.containsKey(r.getUniqueId()));
 
+        if (sessions.containsKey(e.getPlayer().getUniqueId())) {
+            e.setCancelled(true);
+        }
+    }
+
+    // Step 2: read the captcha answer last, even if LiteBans (or anything else) cancelled the message
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
+    public void onChatAnswer(AsyncPlayerChatEvent e) {
         Player p = e.getPlayer();
         if (!sessions.containsKey(p.getUniqueId())) return;
 
-        e.setCancelled(true);
         String msg = e.getMessage().trim();
 
         Bukkit.getScheduler().runTask(this, () -> {
