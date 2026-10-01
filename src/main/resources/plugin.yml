@@ -5,6 +5,11 @@ api-version: '1.20'
 softdepend: [AuthMe]
 author: You
 description: Sends joining players to an isolated void platform and makes them solve a captcha.
+commands:
+  captcha:
+    description: Answer the join captcha
+    usage: /captcha <code>
+    aliases: [verify]
 permissions:
   captchagate.bypass:
     description: Skip the join captcha
