@@ -7,6 +7,9 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.WorldCreator;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
@@ -37,7 +40,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class CaptchaGate extends JavaPlugin implements Listener {
+public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor {
 
     private static final String WORLD_NAME = "captcha_void";
     // No I / O to avoid look-alikes with 1 / 0
@@ -69,6 +72,9 @@ public class CaptchaGate extends JavaPlugin implements Listener {
 
         setupWorld();
         getServer().getPluginManager().registerEvents(this, this);
+        if (getCommand("captcha") != null) {
+            getCommand("captcha").setExecutor(this);
+        }
         startGuard();
 
         if (getServer().getPluginManager().getPlugin("AuthMe") != null) {
@@ -262,6 +268,7 @@ public class CaptchaGate extends JavaPlugin implements Listener {
         p.teleport(platformSpawn);
 
         p.sendMessage("§e§lCAPTCHA §7» Type the code shown on your screen in chat.");
+        p.sendMessage("§7Chat not working (muted)? Use §e/captcha <code>§7 instead.");
         p.sendMessage("§7You have §c" + timeoutSeconds + " seconds§7. A wrong answer kicks you.");
         showCode(p, s);
 
@@ -295,7 +302,38 @@ public class CaptchaGate extends JavaPlugin implements Listener {
         restore(p, s); // so their saved position isn't the captcha platform
     }
 
-    // ------------------------------------------------------------------ chat
+    // ------------------------------------------------------------------ answering
+
+    /** Checks an answer from either chat or /captcha. Must run on the main thread. */
+    private void answer(Player p, String input) {
+        Session s = sessions.get(p.getUniqueId());
+        if (s == null || !p.isOnline()) return;
+
+        if (input.trim().equalsIgnoreCase(s.code)) {
+            pass(p, s);
+        } else {
+            p.kickPlayer("§cWrong captcha.");
+        }
+    }
+
+    // /captcha <code>  (works even when a mute plugin blocks chat)
+    @Override
+    public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage("Players only.");
+            return true;
+        }
+        if (!isPending(p)) {
+            p.sendMessage("§7You don't have a captcha to solve.");
+            return true;
+        }
+        if (args.length < 1) {
+            p.sendMessage("§cUsage: /" + label + " <code>");
+            return true;
+        }
+        answer(p, args[0]);
+        return true;
+    }
 
     // Step 1: keep pending players out of public chat and hide the attempt from everyone
     @EventHandler(priority = EventPriority.LOWEST)
@@ -307,24 +345,14 @@ public class CaptchaGate extends JavaPlugin implements Listener {
         }
     }
 
-    // Step 2: read the captcha answer last, even if LiteBans (or anything else) cancelled the message
+    // Step 2: read the captcha answer last, even if a mute plugin cancelled the message
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = false)
     public void onChatAnswer(AsyncPlayerChatEvent e) {
         Player p = e.getPlayer();
         if (!sessions.containsKey(p.getUniqueId())) return;
 
-        String msg = e.getMessage().trim();
-
-        Bukkit.getScheduler().runTask(this, () -> {
-            Session s = sessions.get(p.getUniqueId());
-            if (s == null || !p.isOnline()) return;
-
-            if (msg.equalsIgnoreCase(s.code)) {
-                pass(p, s);
-            } else {
-                p.kickPlayer("§cWrong captcha.");
-            }
-        });
+        String msg = e.getMessage();
+        Bukkit.getScheduler().runTask(this, () -> answer(p, msg));
     }
 
     private void pass(Player p, Session s) {
@@ -356,9 +384,16 @@ public class CaptchaGate extends JavaPlugin implements Listener {
         }
     }
 
+    // Block every command except /captcha (and its alias /verify) while pending
     @EventHandler
-    public void onCommand(PlayerCommandPreprocessEvent e) {
-        if (isPending(e.getPlayer())) e.setCancelled(true);
+    public void onCommandPreprocess(PlayerCommandPreprocessEvent e) {
+        if (!isPending(e.getPlayer())) return;
+
+        String first = e.getMessage().substring(1).split(" ")[0].toLowerCase();
+        if (first.equals("captcha") || first.equals("verify") || first.startsWith("captchagate:")) {
+            return;
+        }
+        e.setCancelled(true);
     }
 
     @EventHandler
