@@ -10,6 +10,8 @@ import org.bukkit.WorldCreator;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
@@ -33,7 +35,10 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.Map;
@@ -43,6 +48,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor {
 
     private static final String WORLD_NAME = "captcha_void";
+    // Plugin channel the Velocity plugin (CaptchaGateProxy) listens on
+    private static final String CHANNEL = "captchagate:state";
     // No I / O to avoid look-alikes with 1 / 0
     private static final String CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 
@@ -53,7 +60,11 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
     private Location platformSpawn;
     private int timeoutSeconds;
     private int codeLength;
+    private int verifiedHours;
     private boolean authMe = false;
+
+    private File dataFile;
+    private YamlConfiguration data;
 
     private static class Session {
         String code;
@@ -69,9 +80,12 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
         saveDefaultConfig();
         timeoutSeconds = Math.max(5, getConfig().getInt("timeout-seconds", 30));
         codeLength = Math.max(3, Math.min(12, getConfig().getInt("code-length", 6)));
+        verifiedHours = Math.max(1, getConfig().getInt("verified-hours", 24));
 
+        loadData();
         setupWorld();
         getServer().getPluginManager().registerEvents(this, this);
+        getServer().getMessenger().registerOutgoingPluginChannel(this, CHANNEL);
         if (getCommand("captchaz") != null) {
             getCommand("captchaz").setExecutor(this);
         }
@@ -93,7 +107,65 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
             Session s = entry.getValue();
             if (s.task != null) s.task.cancel();
             Player p = Bukkit.getPlayer(entry.getKey());
-            if (p != null) restore(p, s);
+            if (p != null) {
+                sendState(p, false); // don't leave the proxy thinking they're still pending
+                restore(p, s);
+            }
+        }
+        saveData();
+    }
+
+    // ------------------------------------------------------------------ verified-once-a-day storage
+
+    private void loadData() {
+        dataFile = new File(getDataFolder(), "verified.yml");
+        data = YamlConfiguration.loadConfiguration(dataFile);
+
+        // Drop expired entries so the file doesn't grow forever
+        ConfigurationSection sec = data.getConfigurationSection("verified");
+        if (sec != null) {
+            long now = System.currentTimeMillis();
+            long window = verifiedHours * 3_600_000L;
+            for (String key : sec.getKeys(false)) {
+                if (now - sec.getLong(key, 0L) >= window) {
+                    data.set("verified." + key, null);
+                }
+            }
+            saveData();
+        }
+    }
+
+    private void saveData() {
+        try {
+            data.save(dataFile);
+        } catch (IOException ex) {
+            getLogger().warning("Could not save verified.yml: " + ex.getMessage());
+        }
+    }
+
+    private boolean recentlyVerified(UUID id) {
+        long last = data.getLong("verified." + id, 0L);
+        return last > 0 && System.currentTimeMillis() - last < verifiedHours * 3_600_000L;
+    }
+
+    private void markVerified(UUID id) {
+        data.set("verified." + id, System.currentTimeMillis());
+        saveData();
+    }
+
+    private boolean needsCaptcha(Player p) {
+        return !p.hasPermission("captchagate.bypass") && !recentlyVerified(p.getUniqueId());
+    }
+
+    // ------------------------------------------------------------------ proxy messaging
+
+    /** Tells the Velocity plugin whether this player still has a captcha to solve. */
+    private void sendState(Player p, boolean pending) {
+        try {
+            p.sendPluginMessage(this, CHANNEL,
+                    (pending ? "pending" : "done").getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+            // proxy plugin not installed / channel unavailable
         }
     }
 
@@ -230,16 +302,25 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
-        // With AuthMe, the captcha starts after login instead (see hookAuthMe)
+        Player p = e.getPlayer();
+        if (!needsCaptcha(p)) return; // bypass permission, or already verified in the last 24h
+
+        // Lock the proxy (/server etc.) from the moment they join, even before AuthMe login
+        sendState(p, true);
+
+        // With AuthMe, the captcha itself starts after login instead (see hookAuthMe)
         if (authMe) return;
 
-        if (startCaptcha(e.getPlayer(), e.getJoinMessage())) {
+        if (startCaptcha(p, e.getJoinMessage())) {
             e.setJoinMessage(null); // announce only after they pass
         }
     }
 
     private boolean startCaptcha(Player p, String joinMessage) {
-        if (p.hasPermission("captchagate.bypass")) return false;
+        if (!needsCaptcha(p)) {
+            sendState(p, false);
+            return false;
+        }
         if (isPending(p)) return false;
 
         Session s = new Session();
@@ -256,6 +337,7 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
         }
 
         sessions.put(p.getUniqueId(), s);
+        sendState(p, true);
 
         // Hide this player from everyone, and hide other pending players from them
         for (Player o : Bukkit.getOnlinePlayers()) {
@@ -312,6 +394,7 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
         if (input.trim().equalsIgnoreCase(s.code)) {
             pass(p, s);
         } else {
+            // The Velocity plugin turns this kick into a full network disconnect
             p.kickPlayer("§cWrong captcha.");
         }
     }
@@ -358,6 +441,9 @@ public class CaptchaGate extends JavaPlugin implements Listener, CommandExecutor
     private void pass(Player p, Session s) {
         sessions.remove(p.getUniqueId());
         if (s.task != null) s.task.cancel();
+
+        markVerified(p.getUniqueId()); // no captcha again for verified-hours
+        sendState(p, false);           // unlock /server etc. on the proxy
 
         restore(p, s);
         reveal(p);
