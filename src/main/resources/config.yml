@@ -3,3 +3,6 @@ timeout-seconds: 30
 
 # Number of letters in the captcha
 code-length: 6
+
+# Hours a player stays verified after solving the captcha (24 = once a day)
+verified-hours: 24
